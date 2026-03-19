@@ -37,11 +37,11 @@ public class MainActivity extends Activity {
         ws.setSupportMultipleWindows(true);
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-        // Real Chrome UA so Google OAuth doesn't block us
         ws.setUserAgentString(
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/120.0.0.0 Mobile Safari/537.36");
+
         root.addView(webView, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT));
@@ -90,6 +90,7 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
+        // Main WebView client — let everything through, never show error for auth pages
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
@@ -100,31 +101,51 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
+                // If we land on a blank/grey Firebase auth handler page,
+                // redirect back to the app immediately
+                if (url.contains("firebaseapp.com/__/auth") ||
+                    url.contains("/__/auth/handler")) {
+                    // Let Firebase JS finish its work then go home
+                    view.evaluateJavascript(
+                        "(function(){ setTimeout(function(){ " +
+                        "  if(document.body && document.body.innerHTML.trim().length < 50){" +
+                        "    window.location.href='" + APP_URL + "';" +
+                        "  }" +
+                        "}, 2000); })();", null);
+                }
             }
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
                 if (req.isForMainFrame()) {
                     String url = req.getUrl().toString();
-                    if (!url.contains("accounts.google.com") && !url.contains("googleapis.com")) {
-                        progressBar.setVisibility(View.GONE);
-                        webView.setVisibility(View.GONE);
-                        errorLayout.setVisibility(View.VISIBLE);
+                    // Never show error screen for auth-related pages
+                    if (url.contains("accounts.google.com") ||
+                        url.contains("googleapis.com") ||
+                        url.contains("firebaseapp.com") ||
+                        url.contains("firebase.google.com")) {
+                        return;
                     }
+                    progressBar.setVisibility(View.GONE);
+                    webView.setVisibility(View.GONE);
+                    errorLayout.setVisibility(View.VISIBLE);
                 }
             }
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 String url = req.getUrl().toString();
+                // Keep ALL of these inside the WebView
                 if (url.contains("adicodexy.github.io") ||
                     url.contains("accounts.google.com") ||
                     url.contains("googleapis.com") ||
                     url.contains("google.com/o/oauth") ||
                     url.contains("firebaseapp.com") ||
                     url.contains("firebase.google.com") ||
-                    url.contains("ariarohiatre")) {
+                    url.contains("ariarohiatre") ||
+                    url.startsWith("about:")) {
                     return false;
                 }
-                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch(Exception e){}
+                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+                catch (Exception e) { /* ignore */ }
                 return true;
             }
         });
@@ -135,31 +156,56 @@ public class MainActivity extends Activity {
                 progressBar.setProgress(p);
                 if (p == 100) progressBar.setVisibility(View.GONE);
             }
+
             @Override
             public boolean onCreateWindow(WebView view, boolean isDialog,
                     boolean isUserGesture, android.os.Message resultMsg) {
-                WebView popup = new WebView(MainActivity.this);
-                popup.getSettings().setJavaScriptEnabled(true);
-                popup.getSettings().setDomStorageEnabled(true);
-                popup.getSettings().setUserAgentString(
+                // Popup WebView for Google sign-in
+                final WebView popup = new WebView(MainActivity.this);
+                WebSettings ps = popup.getSettings();
+                ps.setJavaScriptEnabled(true);
+                ps.setDomStorageEnabled(true);
+                ps.setUserAgentString(
                     "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
                     "AppleWebKit/537.36 (KHTML, like Gecko) " +
                     "Chrome/120.0.0.0 Mobile Safari/537.36");
+
                 popup.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public void onPageFinished(WebView v, String url) {
+                        // Once Firebase auth handler finishes, close popup + reload app
+                        if (url.contains("firebaseapp.com/__/auth") ||
+                            url.contains("/__/auth/handler")) {
+                            // Give Firebase JS 1.5s to post the token back to the opener
+                            popup.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    root.removeView(popup);
+                                    // Reload the app so onAuthStateChanged fires
+                                    webView.loadUrl(APP_URL);
+                                }
+                            }, 1500);
+                        }
+                    }
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                         String url = req.getUrl().toString();
-                        if (url.contains("adicodexy.github.io") || url.contains("firebaseapp.com")) {
-                            webView.loadUrl(url);
+                        // If redirected back to the app directly, load in main WebView
+                        if (url.contains("adicodexy.github.io")) {
                             root.removeView(popup);
+                            webView.loadUrl(url);
                             return true;
                         }
                         return false;
                     }
                 });
+
+                popup.setWebChromeClient(new WebChromeClient());
+
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT);
                 root.addView(popup, lp);
+
                 WebView.WebViewTransport t = (WebView.WebViewTransport) resultMsg.obj;
                 t.setWebView(popup);
                 resultMsg.sendToTarget();
