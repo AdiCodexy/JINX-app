@@ -13,7 +13,7 @@ import android.graphics.Color;
 public class MainActivity extends Activity {
 
     // ── CHANGE THIS to your GitHub Pages URL ──
-    private static final String APP_URL = "https://aditya7karale.github.io/bestypt/";
+    private static final String APP_URL = "https://adicodexy.github.io/BetterThanYpt/";;
 
     private WebView webView;
     private ProgressBar progressBar;
