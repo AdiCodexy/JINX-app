@@ -27,6 +27,7 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.parseColor("#0a0a0f"));
 
+        // ── Main WebView ──
         webView = new WebView(this);
         webView.setBackgroundColor(Color.parseColor("#0a0a0f"));
         WebSettings ws = webView.getSettings();
@@ -37,6 +38,7 @@ public class MainActivity extends Activity {
         ws.setSupportMultipleWindows(true);
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // Real Chrome UA — required for Google OAuth
         ws.setUserAgentString(
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -46,6 +48,7 @@ public class MainActivity extends Activity {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT));
 
+        // ── Progress bar ──
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgressTintList(
@@ -53,6 +56,7 @@ public class MainActivity extends Activity {
         root.addView(progressBar, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, 8));
 
+        // ── Error layout ──
         errorLayout = new LinearLayout(this);
         errorLayout.setOrientation(LinearLayout.VERTICAL);
         errorLayout.setGravity(android.view.Gravity.CENTER);
@@ -90,7 +94,7 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        // Main WebView client — let everything through, never show error for auth pages
+        // ── WebViewClient ──
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
@@ -101,30 +105,15 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
-                // If we land on a blank/grey Firebase auth handler page,
-                // redirect back to the app immediately
-                if (url.contains("firebaseapp.com/__/auth") ||
-                    url.contains("/__/auth/handler")) {
-                    // Let Firebase JS finish its work then go home
-                    view.evaluateJavascript(
-                        "(function(){ setTimeout(function(){ " +
-                        "  if(document.body && document.body.innerHTML.trim().length < 50){" +
-                        "    window.location.href='" + APP_URL + "';" +
-                        "  }" +
-                        "}, 2000); })();", null);
-                }
             }
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
                 if (req.isForMainFrame()) {
                     String url = req.getUrl().toString();
-                    // Never show error screen for auth-related pages
                     if (url.contains("accounts.google.com") ||
                         url.contains("googleapis.com") ||
                         url.contains("firebaseapp.com") ||
-                        url.contains("firebase.google.com")) {
-                        return;
-                    }
+                        url.contains("firebase.google.com")) return;
                     progressBar.setVisibility(View.GONE);
                     webView.setVisibility(View.GONE);
                     errorLayout.setVisibility(View.VISIBLE);
@@ -133,7 +122,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 String url = req.getUrl().toString();
-                // Keep ALL of these inside the WebView
+                // Keep all these inside the WebView — never open in browser
                 if (url.contains("adicodexy.github.io") ||
                     url.contains("accounts.google.com") ||
                     url.contains("googleapis.com") ||
@@ -150,6 +139,7 @@ public class MainActivity extends Activity {
             }
         });
 
+        // ── WebChromeClient — handles the Google sign-in popup ──
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int p) {
@@ -160,7 +150,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean onCreateWindow(WebView view, boolean isDialog,
                     boolean isUserGesture, android.os.Message resultMsg) {
-                // Popup WebView for Google sign-in
+
                 final WebView popup = new WebView(MainActivity.this);
                 WebSettings ps = popup.getSettings();
                 ps.setJavaScriptEnabled(true);
@@ -173,25 +163,29 @@ public class MainActivity extends Activity {
                 popup.setWebViewClient(new WebViewClient() {
                     @Override
                     public void onPageFinished(WebView v, String url) {
-                        // Once Firebase auth handler finishes, close popup + reload app
-                        if (url.contains("firebaseapp.com/__/auth") ||
-                            url.contains("/__/auth/handler")) {
-                            // Give Firebase JS 1.5s to post the token back to the opener
+                        // Firebase auth handler page — let its JS run,
+                        // then just close the popup.
+                        // DO NOT reload the main WebView — Firebase SDK
+                        // in the main window handles onAuthStateChanged itself.
+                        if (url.contains("/__/auth/handler") ||
+                            url.contains("firebaseapp.com/__/auth")) {
                             popup.postDelayed(new Runnable() {
                                 @Override public void run() {
-                                    root.removeView(popup);
-                                    // Reload the app so onAuthStateChanged fires
-                                    webView.loadUrl(APP_URL);
+                                    if (popup.getParent() != null) {
+                                        root.removeView(popup);
+                                    }
+                                    // No reload — Firebase JS already notified
+                                    // the main window via window.opener.postMessage
                                 }
-                            }, 1500);
+                            }, 2000);
                         }
                     }
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                         String url = req.getUrl().toString();
-                        // If redirected back to the app directly, load in main WebView
+                        // If Google redirects directly back to app (rare), handle it
                         if (url.contains("adicodexy.github.io")) {
-                            root.removeView(popup);
+                            if (popup.getParent() != null) root.removeView(popup);
                             webView.loadUrl(url);
                             return true;
                         }
@@ -199,12 +193,18 @@ public class MainActivity extends Activity {
                     }
                 });
 
-                popup.setWebChromeClient(new WebChromeClient());
+                // Give popup its own chrome client so it can load properly
+                popup.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onCloseWindow(WebView window) {
+                        // Google closed the popup itself — just remove it
+                        if (popup.getParent() != null) root.removeView(popup);
+                    }
+                });
 
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                root.addView(popup, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT);
-                root.addView(popup, lp);
+                    FrameLayout.LayoutParams.MATCH_PARENT));
 
                 WebView.WebViewTransport t = (WebView.WebViewTransport) resultMsg.obj;
                 t.setWebView(popup);
